@@ -1,0 +1,433 @@
+<!--
+  ╔══════════════════════════════════════════════════════════════════════════╗
+  ║  TERMIN-AUSWAHL WIDGET                                                   ║
+  ║  Version: 1.0.0                                                          ║
+  ║  Anforderungen:                                                          ║
+  ║  – Zeigt Samstag + Sonntag des nächsten Lieferwochenendes                ║
+  ║  – Wechsel auf Folgewoche nach Cutoff-Zeit (Fr 12 Uhr, außer Feiertag)   ║
+  ║  – Feiertage via API (get.api-feiertage.de) mit manuellem Fallback       ║
+  ║  – Sperrt Submit-Button bis eine Auswahl getroffen wurde                 ║
+  ║  – Schreibt gewähltes Datum in verstecktes Formularfeld                  ║
+  ║                                                                          ║
+  ║  KONFIGURATION: Alle Einstellungen in DATE_SELECTOR_CONFIG (s.u.)        ║
+  ╚══════════════════════════════════════════════════════════════════════════╝
+-->
+
+<!-- Google Font (Ubuntu) – bei Bedarf durch eigene Schrift ersetzen -->
+<link href="https://fonts.googleapis.com/css2?family=Ubuntu:wght@400;500;700&display=swap" rel="stylesheet">
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     KONFIGURATION  ←  Hier alle Anpassungen vornehmen
+     ═══════════════════════════════════════════════════════════════════════ -->
+<script>
+window.DATE_SELECTOR_CONFIG = {
+
+  // ── Texte & IDs ──────────────────────────────────────────────────────
+  /** Überschrift über den Buttons */
+  title: "Wähle den Termin für deine Probelieferung",
+
+  /** name-Attribut des versteckten Formularfeldes, das den Wert erhält */
+  trackingFieldName: "termin_auswahl",
+
+  /** id des Container-Elements, in das die Buttons gerendert werden */
+  containerId: "dates",
+
+  // ── Datumsformatierung ───────────────────────────────────────────────
+  /** BCP-47-Sprach-Tag für toLocaleDateString */
+  locale: "de-DE",
+
+  /** Optionen für toLocaleDateString – beliebig anpassbar */
+  dateFormatOptions: {
+    weekday: "long",
+    day:     "2-digit",
+    month:   "2-digit",
+    year:    "numeric",
+  },
+
+  // ── Cutoff-Zeiten ────────────────────────────────────────────────────
+  /** Ab wann auf das Wochenende der Folgewoche gewechselt wird.
+   *  Normalfall:        Freitag    ab cutoff.friday    (Do/Fr kein Feiertag)
+   *  Freitag Feiertag:  Donnerstag ab cutoff.thursday
+   *  Donnerstag Feiert: Mittwoch   ab cutoff.wednesday (Vorrang vor Fr-Regel) */
+  cutoff: {
+    friday:    { hour: 12, minute: 0 },
+    thursday:  { hour: 12, minute: 0 },
+    wednesday: { hour: 12, minute: 0 },
+  },
+
+  // ── Feiertage ────────────────────────────────────────────────────────
+  holidays: {
+    /** true  → API-Abruf, bei Fehler automatischer Fallback auf manuelle Berechnung
+     *  false → immer manuelle Berechnung (kein Netzwerkaufruf) */
+    useApi: true,
+
+    /** Endpunkt der Feiertags-API; states-Parameter ggf. anpassen */
+    apiUrl: "https://get.api-feiertage.de/?states=he",
+
+    /** Maximale Wartezeit auf API-Antwort in Millisekunden */
+    apiTimeoutMs: 3000,
+
+    /** Wie lange das API-Ergebnis im sessionStorage gecacht wird (Stunden) */
+    cacheHours: 6,
+
+    /** Manuelle Feiertage (Fallback wenn useApi: false oder API nicht erreichbar)
+     *
+     *  fixedDates: Feiertage mit festem Datum – Format: [Monat (1-12), Tag]
+     *  Standardmäßig konfiguriert für Hessen. */
+    fixedDates: [
+      [1,  1],  // Neujahr
+      [5,  1],  // Tag der Arbeit
+      [10, 3],  // Tag der Deutschen Einheit
+      [10, 26], // Reformationstag (Hessen)
+      [12, 25], // 1. Weihnachtstag
+      [12, 26], // 2. Weihnachtstag
+    ],
+
+    /** Bewegliche Feiertage relativ zum Ostersonntag – Format: Tage-Offset
+     *  Standardmäßig konfiguriert für Hessen. */
+    movingOffsets: [
+      -2,  // Karfreitag
+       0,  // Ostersonntag
+       1,  // Ostermontag
+      39,  // Christi Himmelfahrt
+      49,  // Pfingstsonntag
+      50,  // Pfingstmontag
+      60,  // Fronleichnam (Hessen)
+    ],
+  },
+
+};
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     HTML-STRUKTUR  ←  Nicht ändern, außer CSS-Klassen für eigenes Styling
+     ═══════════════════════════════════════════════════════════════════════ -->
+<div class="ds-title" id="dateSelectorTitle"></div>
+<div id="dates" class="ds-container" role="group" aria-label="Terminauswahl"></div>
+
+<!-- Button-Template – wird per JS geklont, kein direktes Rendering -->
+<template id="tmpl-date-btn">
+  <button class="ds-btn" type="button" aria-pressed="false">
+    <span class="ds-btn__label"></span>
+    <span class="ds-btn__check" aria-hidden="true">✓</span>
+  </button>
+</template>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     STYLES
+     ═══════════════════════════════════════════════════════════════════════ -->
+<style>
+  /* Versteckt das native Tracking-Feld im Funnel */
+  .fun-items-center:has([name="termin_auswahl"]) { display: none !important; }
+
+  .ds-title {
+    text-align: center;
+    font-family: 'Ubuntu', sans-serif;
+    font-weight: 700;
+    font-size: 24px;
+    margin-bottom: 20px;
+    color: #15123A;
+  }
+
+  .ds-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .ds-btn {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 85%;
+    max-width: 520px;
+    margin: 12px 0;
+    padding: 18px;
+    font-size: 20px;
+    font-family: 'Ubuntu', sans-serif;
+    border-radius: 10px;
+    border: 2px solid transparent;
+    background: #15123A;
+    color: white;
+    cursor: pointer;
+    transition: background 0.2s ease, border-color 0.2s ease;
+  }
+
+  .ds-btn:hover  { background: #1f1b56; }
+  .ds-btn:focus-visible {
+    outline: none;
+    border-color: #7c76d4;
+  }
+  .ds-btn.active        { background: #2E2A7B; }
+  .ds-btn__check        { opacity: 0; transition: opacity 0.2s ease; }
+  .ds-btn.active .ds-btn__check { opacity: 1; }
+</style>
+
+<!-- ═══════════════════════════════════════════════════════════════════════
+     LOGIK  ←  Nicht ändern
+     ═══════════════════════════════════════════════════════════════════════ -->
+<script>
+;(function (cfg) {
+  "use strict";
+
+  // ── Titelzeile ──────────────────────────────────────────────────────────
+  var titleEl = document.getElementById("dateSelectorTitle");
+  if (titleEl) titleEl.textContent = cfg.title;
+
+  // ══════════════════════════════════════════════════════════════════════
+  // FEIERTAGE – manuelle Berechnung (Hessen, als Fallback)
+  // ══════════════════════════════════════════════════════════════════════
+  function easterSunday(year) {
+    var a=year%19, b=Math.floor(year/100), c=year%100,
+        d=Math.floor(b/4), e=b%4, f=Math.floor((b+8)/25),
+        g=Math.floor((b-f+1)/3), h=(19*a+b-d-g+15)%30,
+        i=Math.floor(c/4), k=c%4, l=(32+2*e+2*i-h-k)%7,
+        m=Math.floor((a+11*h+22*l)/451),
+        mo=Math.floor((h+l-7*m+114)/31)-1,
+        dy=((h+l-7*m+114)%31)+1;
+    return new Date(year, mo, dy);
+  }
+
+  function manualHolidays(year) {
+    var fixed = cfg.holidays.fixedDates.map(function(p){
+      return new Date(year, p[0]-1, p[1]); // Monat 1-basiert → 0-basiert
+    });
+    var e = easterSunday(year);
+    var moving = cfg.holidays.movingOffsets.map(function(n){
+      var d = new Date(e); d.setDate(e.getDate()+n); return d;
+    });
+    return fixed.concat(moving);
+  }
+
+  function isHolidayManual(date) {
+    return manualHolidays(date.getFullYear()).some(function(h){
+      return h.getFullYear()===date.getFullYear()
+          && h.getMonth()   ===date.getMonth()
+          && h.getDate()    ===date.getDate();
+    });
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // FEIERTAGE – API-Abruf mit sessionStorage-Cache
+  // ══════════════════════════════════════════════════════════════════════
+  var CACHE_KEY = "ds_holidays_v1";
+
+  function cacheGet() {
+    try {
+      var raw = sessionStorage.getItem(CACHE_KEY);
+      if (!raw) return null;
+      var obj = JSON.parse(raw);
+      if (Date.now() > obj.exp) { sessionStorage.removeItem(CACHE_KEY); return null; }
+      return obj.data;
+    } catch(e) { return null; }
+  }
+
+  function cacheSet(arr) {
+    try {
+      sessionStorage.setItem(CACHE_KEY, JSON.stringify({
+        data: arr,
+        exp:  Date.now() + cfg.holidays.cacheHours * 3600000
+      }));
+    } catch(e) { /* Storage voll – kein kritischer Fehler */ }
+  }
+
+  function toKey(d) {
+    return d.getFullYear()
+      + "-" + String(d.getMonth()+1).padStart(2,"0")
+      + "-" + String(d.getDate()).padStart(2,"0");
+  }
+
+  /** Lädt Feiertage und ruft cb(isHolidayFn) auf – immer, auch im Fehlerfall */
+  function loadHolidays(cb) {
+    if (!cfg.holidays.useApi) { cb(isHolidayManual); return; }
+
+    var cached = cacheGet();
+    if (cached) {
+      var s = new Set(cached);
+      cb(function(d){ return s.has(toKey(d)); });
+      return;
+    }
+
+    var settled = false;
+    function fallback(reason) {
+      if (settled) return;
+      settled = true;
+      console.warn("[DateSelector] " + reason + " – Fallback auf manuelle Berechnung.");
+      cb(isHolidayManual);
+    }
+
+    var timer = setTimeout(function(){ fallback("API-Timeout"); }, cfg.holidays.apiTimeoutMs);
+
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", cfg.holidays.apiUrl, true);
+    xhr.onload = function() {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        var json = JSON.parse(xhr.responseText);
+        var arr  = (json.feiertage || json || [])
+          .map(function(e){ return e.date; })
+          .filter(Boolean);
+        if (!arr.length) throw new Error("Leere Feiertagsliste");
+        cacheSet(arr);
+        var set = new Set(arr);
+        cb(function(d){ return set.has(toKey(d)); });
+      } catch(e) {
+        fallback("API-Antwort ungültig (" + e.message + ")");
+      }
+    };
+    xhr.onerror  = function(){ clearTimeout(timer); fallback("API nicht erreichbar"); };
+    xhr.onabort  = function(){ clearTimeout(timer); fallback("API-Anfrage abgebrochen"); };
+    xhr.send();
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // DATUMS-LOGIK
+  // ══════════════════════════════════════════════════════════════════════
+  function addDays(date, n) {
+    var d = new Date(date);
+    d.setDate(d.getDate() + n);
+    d.setHours(0,0,0,0);
+    return d;
+  }
+
+  function afterCutoff(now, c) {
+    return now.getHours() > c.hour
+        || (now.getHours() === c.hour && now.getMinutes() >= c.minute);
+  }
+
+  /** Nächster Samstag (heute = Sa → +7 Tage) */
+  function nextSat(now) {
+    var day  = now.getDay();
+    var diff = day === 6 ? 7 : (6 - day + 7) % 7 || 7;
+    return addDays(now, diff);
+  }
+
+  /** Gibt true zurück, wenn das Wochenende der FOLGEWOCHE gezeigt werden soll */
+  function useNextWeekend(now, isHoliday) {
+    var day = now.getDay();
+
+    // Sa oder So: laufendes Wochenende ist vorbei → immer Folgewoche
+    if (day === 6 || day === 0) return true;
+
+    var sat = nextSat(now);
+    var fri = addDays(sat, -1);
+    var thu = addDays(sat, -2);
+
+    // Donnerstag = Feiertag → Cutoff Mi 12 Uhr (Vorrang vor Fr-Regel)
+    if (isHoliday(thu)) {
+      return day > 3 || (day === 3 && afterCutoff(now, cfg.cutoff.wednesday));
+    }
+    // Freitag = Feiertag → Cutoff Do 12 Uhr
+    if (isHoliday(fri)) {
+      return day > 4 || (day === 4 && afterCutoff(now, cfg.cutoff.thursday));
+    }
+    // Normalfall → Cutoff Fr 12 Uhr
+    return day > 5 || (day === 5 && afterCutoff(now, cfg.cutoff.friday));
+  }
+
+  function weekendDates(now, next) {
+    var sat = nextSat(now);
+    if (next) sat = addDays(sat, 7);
+    return [sat, addDays(sat, 1)];
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // FORMULAR-SPERRE
+  // ══════════════════════════════════════════════════════════════════════
+  function getSubmitBtn() {
+    var field = document.querySelector('[name="' + cfg.trackingFieldName + '"]');
+    return (field && field.form)
+      ? field.form.querySelector('button[type="submit"], input[type="submit"]')
+      : null;
+  }
+
+  function lockForm() {
+    var field     = document.querySelector('[name="' + cfg.trackingFieldName + '"]');
+    var submitBtn = getSubmitBtn();
+    if (!field || !field.form || !submitBtn) return;
+
+    submitBtn.disabled = true;
+
+    // Capture-Phase: greift vor allen anderen Submit-Handlern
+    field.form.addEventListener("submit", function(e) {
+      if (submitBtn.disabled) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+    }, true);
+  }
+
+  function unlockForm() {
+    var btn = getSubmitBtn();
+    if (btn) btn.disabled = false;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // UI
+  // ══════════════════════════════════════════════════════════════════════
+  function formatDate(date) {
+    return date.toLocaleDateString(cfg.locale, cfg.dateFormatOptions);
+  }
+
+  function setTracking(value) {
+    var field = document.querySelector('[name="' + cfg.trackingFieldName + '"]');
+    if (!field) { console.warn("[DateSelector] Tracking-Feld nicht gefunden:", cfg.trackingFieldName); return; }
+    field.value = value;
+    ["input", "change"].forEach(function(t){
+      field.dispatchEvent(new Event(t, { bubbles: true }));
+    });
+  }
+
+  function createBtn(date, onSelect) {
+    var tmpl = document.getElementById("tmpl-date-btn");
+    var btn  = tmpl.content.cloneNode(true).querySelector(".ds-btn");
+    btn.querySelector(".ds-btn__label").textContent = formatDate(date);
+    btn.addEventListener("click", function(){ onSelect(btn, formatDate(date)); });
+    return btn;
+  }
+
+  function render(dates) {
+    var container = document.getElementById(cfg.containerId);
+    if (!container) {
+      console.error("[DateSelector] Container nicht gefunden: #" + cfg.containerId);
+      return;
+    }
+    container.innerHTML = "";
+    var activeBtn = null;
+
+    dates.forEach(function(date) {
+      var btn = createBtn(date, function(clicked, label) {
+        if (activeBtn) { activeBtn.classList.remove("active"); activeBtn.setAttribute("aria-pressed","false"); }
+        activeBtn = clicked;
+        clicked.classList.add("active");
+        clicked.setAttribute("aria-pressed","true");
+        setTracking(label);
+        unlockForm();
+      });
+      container.appendChild(btn);
+    });
+
+    lockForm();
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // INIT
+  // ══════════════════════════════════════════════════════════════════════
+  loadHolidays(function(isHoliday) {
+    var now   = new Date();
+    var next  = useNextWeekend(now, isHoliday);
+    var dates = weekendDates(now, next);
+    render(dates);
+
+    // Natives Tracking-Feld im Funnel ausblenden
+    var field = document.querySelector('[name="' + cfg.trackingFieldName + '"]');
+    if (field && field.closest) {
+      var wrap = field.closest(".fun-items-center");
+      if (wrap) wrap.style.setProperty("display", "none", "important");
+    }
+  });
+
+})(window.DATE_SELECTOR_CONFIG);
+</script>
