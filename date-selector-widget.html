@@ -1,7 +1,7 @@
 <!--
   ╔══════════════════════════════════════════════════════════════════════════╗
   ║  TERMIN-AUSWAHL WIDGET                                                   ║
-  ║  Version: 1.0.0                                                          ║
+  ║  Version: 1.0.1                                                          ║
   ║  Anforderungen:                                                          ║
   ║  – Zeigt Samstag + Sonntag des nächsten Lieferwochenendes                ║
   ║  – Wechsel auf Folgewoche nach Cutoff-Zeit (Fr 12 Uhr, außer Feiertag)   ║
@@ -308,8 +308,8 @@ window.DATE_SELECTOR_CONFIG = {
   function useNextWeekend(now, isHoliday) {
     var day = now.getDay();
 
-    // Sa oder So: laufendes Wochenende ist vorbei → immer Folgewoche
-    if (day === 6 || day === 0) return true;
+    // Sa oder So: laufendes Wochenende ist vorbei
+    if (day === 6 || day === 0) return false;
 
     var sat = nextSat(now);
     var fri = addDays(sat, -1);
